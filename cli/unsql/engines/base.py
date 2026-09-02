@@ -461,30 +461,6 @@ class DBEngine(ABC):
                 "Mention specific table names in your query for their complete column schema.]"
             )
 
-        from ..core.topology import inject_topology_hints
-        topology_text = inject_topology_hints(tables, matched_tables)
-        if topology_text:
-            lines.append(topology_text)
-
-        # Inject semantic dictionary mappings if present
-        from ..core.security import SecurityContext
-        policy = SecurityContext.get_policy()
-        if policy and getattr(policy, "semantic_dictionary_path", None):
-            dict_path = policy.semantic_dictionary_path
-            try:
-                import os, yaml
-                if os.path.exists(dict_path):
-                    with open(dict_path, 'r', encoding='utf-8') as f:
-                        semantic_data = yaml.safe_load(f)
-                    if semantic_data:
-                        lines.append("\n=== SEMANTIC BUSINESS DICTIONARY ===")
-                        lines.append("Use the following definitions to map business concepts to the schema:")
-                        for key, value in semantic_data.items():
-                            lines.append(f"- {key}: {value}")
-                        lines.append("=====================================")
-            except Exception:
-                pass
-
         return "\n".join(lines).rstrip()
 
     # ── Discovery ─────────────────────────────────────────────────────────────

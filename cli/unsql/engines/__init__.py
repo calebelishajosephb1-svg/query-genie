@@ -136,15 +136,6 @@ def fuzzy_match_engine(token: str) -> type | None:
         canonical = _ALIASES[matches[0]]
         # Log fuzzy miss for audit trail (defense-in-depth)
         _logger.warning("Fuzzy engine match: '%s' → '%s' (%s). Supported: %s", token, matches[0], canonical, sorted(_ALIASES.keys())[:5])
-        # Optional: if SecurityContext role is VIEWER, deny fuzzy auto-select for sensitive engines
-        try:
-            from ..core.security import SecurityContext
-            pol = SecurityContext.get_policy()
-            if getattr(pol, "role", None) and getattr(pol, "role", "").lower() == "viewer":
-                # VIEWER should not auto-select via fuzzy — require exact alias
-                return None
-        except Exception:
-            pass
         return ENGINES.get(canonical)
 
     # Log complete miss for diagnostics

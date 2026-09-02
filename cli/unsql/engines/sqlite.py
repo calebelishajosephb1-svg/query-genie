@@ -131,10 +131,8 @@ class SQLiteEngine(DBEngine):
     def _describe(self, table: str) -> QueryResult:
         """Use PRAGMA table_info to emulate DESCRIBE."""
         # Validate identifier to prevent injection via PRAGMA string interpolation
-        try:
-            from ..core.security.validate import validate_identifier
-            validate_identifier(table, None)
-        except Exception:
+        import re as _re
+        if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]{0,127}", table or ""):
             raise RuntimeError(f"Invalid table name for DESCRIBE: {table}")
         cur = self._conn.cursor()
         try:
