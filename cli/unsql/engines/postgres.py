@@ -85,7 +85,7 @@ class PostgresEngine(DBEngine):
             self._cursor = self._conn.cursor()
         except Exception as exc:
             # Sanitize error — don't leak connection string / password (checklist §13)
-            from unsql.core.security.redact import redact as _redact
+            from ..redact import redact as _redact
             safe_msg = _redact(str(exc))
             raise ConnectionError(f"PostgreSQL connection failed: {safe_msg}") from None
 

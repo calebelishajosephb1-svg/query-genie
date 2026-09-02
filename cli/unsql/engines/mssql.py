@@ -111,7 +111,7 @@ class MSSQLEngine(DBEngine):
             self._conn.autocommit = False
             self._cursor = self._conn.cursor()
         except Exception as exc:
-            from unsql.core.security.redact import redact as _redact
+            from ..redact import redact as _redact
             safe_msg = _redact(str(exc))
             raise ConnectionError(f"SQL Server connection failed: {safe_msg}") from None
 

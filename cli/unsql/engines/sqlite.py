@@ -107,7 +107,7 @@ class SQLiteEngine(DBEngine):
                 return QueryResult(columns=cols, rows=rows, rowcount=len(rows), is_select=True)
             return QueryResult(columns=[], rows=[], rowcount=cur.rowcount or 0, is_select=False)
         except sqlite3.Error as exc:
-            from ..core.security.redact import redact as _redact
+            from ..redact import redact as _redact
             safe = _redact(str(exc))
             # Classify error for actionable message without leaking internal paths/home dir
             raise RuntimeError(safe) from None

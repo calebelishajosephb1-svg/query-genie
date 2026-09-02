@@ -63,7 +63,7 @@ class MySQLEngine(DBEngine):
             self._conn = mysql.connector.connect(**config)
             self._cursor = self._conn.cursor()
         except Exception as exc:
-            from unsql.core.security.redact import redact as _redact
+            from ..redact import redact as _redact
             safe_msg = _redact(str(exc))
             raise ConnectionError(f"MySQL connection failed: {safe_msg}") from None
 

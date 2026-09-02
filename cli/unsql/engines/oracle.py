@@ -150,7 +150,7 @@ class OracleEngine(DBEngine):
                 except Exception as exc:
                     last_exc = exc
                     continue
-            from ..core.security.redact import redact as _redact2
+            from ..redact import redact as _redact2
             safe2 = _redact2(str(last_exc)) if last_exc else ""
             raise ConnectionError(f"Oracle connection failed (RAC={is_rac}, hosts={hosts}): {safe2}") from None
         elif sid:
@@ -183,7 +183,7 @@ class OracleEngine(DBEngine):
             self._is_rac = is_rac
             self._rac_hosts = hosts
         except Exception as exc:
-            from ..core.security.redact import redact as _redact
+            from ..redact import redact as _redact
             safe = _redact(str(exc))
             raise ConnectionError(f"Oracle connection failed: {safe}") from None
 
@@ -253,7 +253,7 @@ class OracleEngine(DBEngine):
                 return QueryResult(columns=cols, rows=rows, rowcount=len(rows), is_select=True)
             return QueryResult(columns=[], rows=[], rowcount=self._cursor.rowcount or 0, is_select=False)
         except Exception as exc:
-            from ..core.security.redact import redact as _redact
+            from ..redact import redact as _redact
             safe = _redact(str(exc))
             raise RuntimeError(safe) from None
 
