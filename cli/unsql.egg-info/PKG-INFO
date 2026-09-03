@@ -1,0 +1,125 @@
+Metadata-Version: 2.4
+Name: unsql
+Version: 2.0.0
+Summary: UNSQL — an AI layer that sits directly over your database (natural language to dialect-correct SQL).
+License: MIT License
+        
+        Copyright (c) 2026 UNSQL Contributors
+        
+        Permission is hereby granted, free of charge, to any person obtaining a copy
+        of this software and associated documentation files (the "Software"), to deal
+        in the Software without restriction, including without limitation the rights
+        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+        copies of the Software, and to permit persons to whom the Software is
+        furnished to do so, subject to the following conditions:
+        
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+        
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+        SOFTWARE.
+        
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: httpx>=0.27
+Requires-Dist: rich>=13.7
+Requires-Dist: prompt_toolkit>=3.0
+Provides-Extra: postgresql
+Requires-Dist: psycopg2-binary>=2.9; extra == "postgresql"
+Provides-Extra: mysql
+Requires-Dist: mysql-connector-python>=8.3; extra == "mysql"
+Provides-Extra: mariadb
+Requires-Dist: mysql-connector-python>=8.3; extra == "mariadb"
+Provides-Extra: mssql
+Requires-Dist: pyodbc>=5.1; extra == "mssql"
+Provides-Extra: oracle
+Requires-Dist: oracledb>=2.0; extra == "oracle"
+Provides-Extra: db2
+Requires-Dist: ibm-db>=3.2; extra == "db2"
+Provides-Extra: snowflake
+Requires-Dist: snowflake-connector-python>=3.7; extra == "snowflake"
+Provides-Extra: access
+Requires-Dist: pyodbc>=5.1; extra == "access"
+Provides-Extra: all
+Requires-Dist: psycopg2-binary>=2.9; extra == "all"
+Requires-Dist: mysql-connector-python>=8.3; extra == "all"
+Requires-Dist: pyodbc>=5.1; extra == "all"
+Requires-Dist: oracledb>=2.0; extra == "all"
+Requires-Dist: snowflake-connector-python>=3.7; extra == "all"
+Dynamic: license-file
+
+# UNSQL
+
+An AI layer that sits directly over your database. Type plain English, get
+dialect-correct SQL, review it, run it — all in one terminal session.
+
+Supported engines: PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, SQLite,
+Db2, Snowflake, Aurora, Access.
+
+## Install
+
+```bash
+cd cli
+python -m pip install -e .            # core (SQLite works out of the box)
+python -m pip install -e ".[all]"     # + the common drivers
+python -m pip install -e ".[oracle]"  # or just the one you need
+```
+
+## Run
+
+```bash
+unsql            # first run walks you through provider / key / model
+unsql --setup    # re-run the wizard
+```
+
+Providers: OpenAI, Anthropic, Gemini, OpenRouter, NVIDIA NIM, Ollama,
+LM Studio, or any OpenAI-compatible endpoint. Config lives in
+`~/.unsql_config` (0600). Environment overrides: `UNSQL_PROVIDER`,
+`UNSQL_API_KEY`, `UNSQL_MODEL`, `UNSQL_BASE_URL`.
+
+## Session
+
+```
+unsql> connect sqlite
+  File path [unsql.db]: demo.db
+unsql[sqlite]> build me a restaurant chain schema with realistic seed data
+  ... SQL is printed, you confirm, it runs ...
+unsql[sqlite]> which branch had the highest margin last quarter?
+unsql[sqlite]> save report.sql
+```
+
+## Commands
+
+| command | what it does |
+| --- | --- |
+| `connect <engine>` | connect (prompts for the params that engine needs) |
+| `disconnect` | close the connection |
+| `engines` | which engines have their driver installed |
+| `tables` / `schema` | introspect the live database |
+| `script <engine> <request>` | offline: plan pass + full script, no DB needed |
+| `save <file>` | write the last SQL to a file |
+| `set` / `set model <name>` | re-run the wizard / switch model |
+| `auto on\|off` | run generated SQL without confirming |
+| `help` / `exit` | |
+
+Anything else is natural language — unless it starts with a SQL keyword, in
+which case it runs verbatim.
+
+## Layout
+
+```
+unsql/
+  repl.py      the REPL
+  ai.py        streaming client (openai / anthropic / gemini wire formats)
+  config.py    provider registry + config store
+  prompts.py   per-dialect rules and prompt builders
+  render.py    tables, SQL highlighting, status lines
+  redact.py    keeps secrets out of printed errors
+  engines/     one adapter per RDBMS
+```
