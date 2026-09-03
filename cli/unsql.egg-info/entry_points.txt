@@ -1,0 +1,2 @@
+[console_scripts]
+unsql = unsql.repl:main
