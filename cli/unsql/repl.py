@@ -14,8 +14,19 @@ import getpass
 import sys
 from typing import Any
 
-from . import render
-from .ai import AIClient, AIError
+from .core.termsetup import setup_console
+
+setup_console()
+
+from . import render  # noqa: E402
+from .ai import AIClient, AIError  # noqa: E402
+
+try:
+    from .gui.visualizer import get_visualizer
+
+    _viz = get_visualizer()
+except Exception:  # keep cli importable without gui
+    _viz = None
 from .config import PROVIDERS, ensure_config, load_config, run_wizard
 from .engines import ENGINES, fuzzy_match_engine
 from .prompts import live_system, plan_system, script_system, strip_fences
@@ -50,6 +61,8 @@ HELP = """
   set                     re-run the AI provider / key / model wizard
   set model <name>        switch model
   auto on|off             run generated SQL without asking (default off)
+  gui [terminal]          open results dashboard (web by default, terminal for TUI)
+  export csv|json [path]  save last SELECT to CSV/JSON (sanitized, inject-safe)
   help                    this text
   exit                    quit
 
