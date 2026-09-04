@@ -221,6 +221,16 @@ class Repl:
             if result.is_select:
                 render.table(result.columns, result.rows)
                 self.last_result = result
+                if _viz is not None and result.rows is not None:
+                    try:
+                        _viz.push_result(
+                            columns=list(result.columns),
+                            rows=list(result.rows),
+                            sql=stmt,
+                            title=f"{self.engine.engine_type} result",
+                        )
+                    except Exception:
+                        pass
             else:
                 render.info(f"  OK ({result.rowcount} row(s) affected)")
         try:
