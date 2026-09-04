@@ -14,8 +14,19 @@ import getpass
 import sys
 from typing import Any
 
-from . import render
-from .ai import AIClient, AIError
+from .core.termsetup import setup_console
+
+setup_console()
+
+from . import render  # noqa: E402
+from .ai import AIClient, AIError  # noqa: E402
+
+try:
+    from .gui.visualizer import get_visualizer
+
+    _viz = get_visualizer()
+except Exception:  # keep cli importable without gui
+    _viz = None
 from .config import PROVIDERS, ensure_config, load_config, run_wizard
 from .engines import ENGINES, fuzzy_match_engine
 from .prompts import live_system, plan_system, script_system, strip_fences
@@ -50,6 +61,8 @@ HELP = """
   set                     re-run the AI provider / key / model wizard
   set model <name>        switch model
   auto on|off             run generated SQL without asking (default off)
+  gui [terminal]          open results dashboard (web by default, terminal for TUI)
+  export csv|json [path]  save last SELECT to CSV/JSON (sanitized, inject-safe)
   help                    this text
   exit                    quit
 
@@ -208,6 +221,16 @@ class Repl:
             if result.is_select:
                 render.table(result.columns, result.rows)
                 self.last_result = result
+                if _viz is not None and result.rows is not None:
+                    try:
+                        _viz.push_result(
+                            columns=list(result.columns),
+                            rows=list(result.rows),
+                            sql=stmt,
+                            title=f"{self.engine.engine_type} result",
+                        )
+                    except Exception:
+                        pass
             else:
                 render.info(f"  OK ({result.rowcount} row(s) affected)")
         try:
@@ -319,6 +342,50 @@ class Repl:
              "snowflake", "aurora", "access"})]
         render.table(["engine", "status"], rows)
 
+    # ── gui / export ─────────────────────────────────────────────────────────
+
+    def cmd_gui(self, rest: str) -> None:
+        if _viz is None:
+            render.error("  GUI not available (install rich).")
+            return
+        mode = rest.strip().lower()
+        if mode in ("terminal", "tui"):
+            _viz.launch_terminal()
+            return
+        has = self.last_result is not None and self.last_result.is_select
+        cols = list(self.last_result.columns) if has else None
+        rows = list(self.last_result.rows or []) if has else None
+        sql = self.last_sql if isinstance(self.last_sql, str) else ""
+        try:
+            url = _viz.launch_web(columns=cols, rows=rows, sql=sql)
+            render.info(f"  GUI dashboard at {url} — use `gui terminal` for TUI or `export csv|json`")
+        except Exception as exc:
+            render.error(f"  Failed to launch GUI: {exc}")
+
+    def cmd_export(self, rest: str) -> None:
+        parts = rest.split(None, 1)
+        fmt = parts[0].lower() if parts else ""
+        path = parts[1].strip().rstrip(";") if len(parts) > 1 else None
+        if fmt not in ("csv", "json"):
+            render.warn("  usage: export csv [path]  |  export json [path]")
+            return
+        res = self.last_result
+        if _viz is None:
+            render.error("  GUI not available.")
+            return
+        if not res or not res.is_select or not res.rows:
+            render.warn("  Nothing to export — run a SELECT first.")
+            return
+        out = path or ("unsql_export.csv" if fmt == "csv" else "unsql_export.json")
+        try:
+            if fmt == "csv":
+                p = _viz.export_csv(out, columns=list(res.columns), rows=list(res.rows))
+            else:
+                p = _viz.export_json(out, columns=list(res.columns), rows=list(res.rows))
+            render.info(f"  Exported {len(res.rows)} rows to {p.resolve()}")
+        except Exception as exc:
+            render.error(f"  Export failed: {exc}")
+
     # ── loop ─────────────────────────────────────────────────────────────────
 
     def dispatch(self, line: str) -> bool:
@@ -353,6 +420,10 @@ class Repl:
         elif head_l == "auto":
             self.auto = rest.lower() in ("on", "true", "yes", "1")
             render.info(f"  auto-run {'on' if self.auto else 'off'}")
+        elif head_l == "gui":
+            self.cmd_gui(rest)
+        elif head_l == "export":
+            self.cmd_export(rest)
         elif head_l in _SQL_STARTERS:
             self.cmd_sql(text)
         else:
@@ -426,11 +497,37 @@ def _split_statements(script: str) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import os
+
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in ("-h", "--help"):
         render.plain(HELP)
+        render.plain("  launcher flags: --gui  --gui-port PORT  --gui-no-browser  --setup\n")
         return 0
     if argv and argv[0] == "--setup":
         run_wizard(load_config())
         return 0
-    return Repl().run()
+
+    if "--gui" in argv:
+        os.environ["UNSQL_GUI"] = "1"
+    for i, a in enumerate(argv):
+        if a == "--gui-port" and i + 1 < len(argv):
+            os.environ["UNSQL_GUI_PORT"] = argv[i + 1]
+        elif a.startswith("--gui-port="):
+            os.environ["UNSQL_GUI_PORT"] = a.split("=", 1)[1]
+        elif a == "--gui-no-browser":
+            os.environ["UNSQL_GUI_NO_BROWSER"] = "1"
+
+    repl = Repl()
+    if os.getenv("UNSQL_GUI"):
+        try:
+            from .gui.visualizer import get_visualizer
+
+            viz = get_visualizer()
+            viz.config.web_port = int(os.getenv("UNSQL_GUI_PORT", "8765"))
+            no_browser = os.getenv("UNSQL_GUI_NO_BROWSER")
+            url = viz.launch_web(open_browser=not bool(no_browser))
+            print(f"[GUI] Dashboard at {url}  — inside REPL type gui or export csv|json")
+        except Exception as exc:
+            print(f"[GUI] Failed to start dashboard: {exc}")
+    return repl.run()

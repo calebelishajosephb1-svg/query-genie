@@ -15,6 +15,8 @@ unsql.egg-info/dependency_links.txt
 unsql.egg-info/entry_points.txt
 unsql.egg-info/requires.txt
 unsql.egg-info/top_level.txt
+unsql/core/__init__.py
+unsql/core/termsetup.py
 unsql/engines/__init__.py
 unsql/engines/access.py
 unsql/engines/aurora.py
@@ -27,3 +29,7 @@ unsql/engines/oracle.py
 unsql/engines/postgres.py
 unsql/engines/snowflake.py
 unsql/engines/sqlite.py
+unsql/gui/__init__.py
+unsql/gui/__main__.py
+unsql/gui/visualizer.py
+unsql/gui/web.py

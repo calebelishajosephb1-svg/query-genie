@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unsql"
-version = "2.0.0"
+version = "2.1.0"
 description = "UNSQL — an AI layer that sits directly over your database (natural language to dialect-correct SQL)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,7 @@ all = [
 
 [project.scripts]
 unsql = "unsql.repl:main"
+unsql-gui = "unsql.gui.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["unsql*"]
