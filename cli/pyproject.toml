@@ -34,6 +34,7 @@ all = [
 
 [project.scripts]
 unsql = "unsql.repl:main"
+unsql-gui = "unsql.gui.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["unsql*"]

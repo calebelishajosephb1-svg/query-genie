@@ -497,11 +497,37 @@ def _split_statements(script: str) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import os
+
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in ("-h", "--help"):
         render.plain(HELP)
+        render.plain("  launcher flags: --gui  --gui-port PORT  --gui-no-browser  --setup\n")
         return 0
     if argv and argv[0] == "--setup":
         run_wizard(load_config())
         return 0
-    return Repl().run()
+
+    if "--gui" in argv:
+        os.environ["UNSQL_GUI"] = "1"
+    for i, a in enumerate(argv):
+        if a == "--gui-port" and i + 1 < len(argv):
+            os.environ["UNSQL_GUI_PORT"] = argv[i + 1]
+        elif a.startswith("--gui-port="):
+            os.environ["UNSQL_GUI_PORT"] = a.split("=", 1)[1]
+        elif a == "--gui-no-browser":
+            os.environ["UNSQL_GUI_NO_BROWSER"] = "1"
+
+    repl = Repl()
+    if os.getenv("UNSQL_GUI"):
+        try:
+            from .gui.visualizer import get_visualizer
+
+            viz = get_visualizer()
+            viz.config.web_port = int(os.getenv("UNSQL_GUI_PORT", "8765"))
+            no_browser = os.getenv("UNSQL_GUI_NO_BROWSER")
+            url = viz.launch_web(open_browser=not bool(no_browser))
+            print(f"[GUI] Dashboard at {url}  — inside REPL type gui or export csv|json")
+        except Exception as exc:
+            print(f"[GUI] Failed to start dashboard: {exc}")
+    return repl.run()
