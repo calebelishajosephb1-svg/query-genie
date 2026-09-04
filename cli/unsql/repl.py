@@ -342,6 +342,50 @@ class Repl:
              "snowflake", "aurora", "access"})]
         render.table(["engine", "status"], rows)
 
+    # ── gui / export ─────────────────────────────────────────────────────────
+
+    def cmd_gui(self, rest: str) -> None:
+        if _viz is None:
+            render.error("  GUI not available (install rich).")
+            return
+        mode = rest.strip().lower()
+        if mode in ("terminal", "tui"):
+            _viz.launch_terminal()
+            return
+        has = self.last_result is not None and self.last_result.is_select
+        cols = list(self.last_result.columns) if has else None
+        rows = list(self.last_result.rows or []) if has else None
+        sql = self.last_sql if isinstance(self.last_sql, str) else ""
+        try:
+            url = _viz.launch_web(columns=cols, rows=rows, sql=sql)
+            render.info(f"  GUI dashboard at {url} — use `gui terminal` for TUI or `export csv|json`")
+        except Exception as exc:
+            render.error(f"  Failed to launch GUI: {exc}")
+
+    def cmd_export(self, rest: str) -> None:
+        parts = rest.split(None, 1)
+        fmt = parts[0].lower() if parts else ""
+        path = parts[1].strip().rstrip(";") if len(parts) > 1 else None
+        if fmt not in ("csv", "json"):
+            render.warn("  usage: export csv [path]  |  export json [path]")
+            return
+        res = self.last_result
+        if _viz is None:
+            render.error("  GUI not available.")
+            return
+        if not res or not res.is_select or not res.rows:
+            render.warn("  Nothing to export — run a SELECT first.")
+            return
+        out = path or ("unsql_export.csv" if fmt == "csv" else "unsql_export.json")
+        try:
+            if fmt == "csv":
+                p = _viz.export_csv(out, columns=list(res.columns), rows=list(res.rows))
+            else:
+                p = _viz.export_json(out, columns=list(res.columns), rows=list(res.rows))
+            render.info(f"  Exported {len(res.rows)} rows to {p.resolve()}")
+        except Exception as exc:
+            render.error(f"  Export failed: {exc}")
+
     # ── loop ─────────────────────────────────────────────────────────────────
 
     def dispatch(self, line: str) -> bool:
