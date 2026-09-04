@@ -376,6 +376,10 @@ class Repl:
         elif head_l == "auto":
             self.auto = rest.lower() in ("on", "true", "yes", "1")
             render.info(f"  auto-run {'on' if self.auto else 'off'}")
+        elif head_l == "gui":
+            self.cmd_gui(rest)
+        elif head_l == "export":
+            self.cmd_export(rest)
         elif head_l in _SQL_STARTERS:
             self.cmd_sql(text)
         else:
