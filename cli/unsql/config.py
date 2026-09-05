@@ -4,8 +4,8 @@ unsql/config.py
 Provider picker + config store (~/.unsql_config, JSON, 0600 on POSIX).
 
 Fields: provider, api_key, model, base_url.
-Env overrides (win over the file): UNSQL_PROVIDER, UNSQL_API_KEY,
-UNSQL_MODEL, UNSQL_BASE_URL.
+Env overrides (win over the file, but the wizard is the normal path):
+UNSQL_AI_PROVIDER, UNSQL_AI_KEY, UNSQL_AI_MODEL, UNSQL_AI_BASE_URL.
 """
 from __future__ import annotations
 
@@ -87,7 +87,9 @@ PROVIDERS: dict[str, dict[str, Any]] = {
     },
 }
 
-_ORDER = list(PROVIDERS.keys())
+# Wizard order — [6] is always "Custom" (any OpenAI-compatible endpoint).
+_ORDER = ["openai", "anthropic", "gemini", "openrouter", "ollama", "custom",
+          "lmstudio", "nvidia"]
 
 
 # ── storage ──────────────────────────────────────────────────────────────────
@@ -119,10 +121,10 @@ def load_config() -> dict:
     """Config from disk, overlaid with UNSQL_* environment variables."""
     cfg = _load()
     for env, field in (
-        ("UNSQL_PROVIDER", "provider"),
-        ("UNSQL_API_KEY", "api_key"),
-        ("UNSQL_MODEL", "model"),
-        ("UNSQL_BASE_URL", "base_url"),
+        ("UNSQL_AI_PROVIDER", "provider"),
+        ("UNSQL_AI_KEY", "api_key"),
+        ("UNSQL_AI_MODEL", "model"),
+        ("UNSQL_AI_BASE_URL", "base_url"),
     ):
         val = os.environ.get(env)
         if val:
