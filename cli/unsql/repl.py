@@ -1,16 +1,16 @@
 """
 unsql/repl.py
 -------------
-The lean UNSQL REPL: an AI layer that sits directly on top of your database.
+The UNSQL session: a real-time natural-language layer sitting directly on top
+of a live database engine.
 
-Type plain English -> UNSQL writes dialect-correct SQL against the live schema,
-shows it, asks once, then runs it and prints the result table.
-Type SQL -> it runs verbatim.
-Type a `word` command (connect, schema, tables, set, save, help, exit) -> it acts.
+Syntax rule, no exceptions: every input ends with ';'.
+Prompt is CONNECT> until you connect, then UNSQL[<engine>]>.
 """
 from __future__ import annotations
 
 import getpass
+import socket
 import sys
 from typing import Any
 
@@ -19,23 +19,25 @@ from .core.termsetup import setup_console
 setup_console()
 
 from . import render  # noqa: E402
+from .agent import Agent, split_statements, statement_kind  # noqa: E402
 from .ai import AIClient, AIError  # noqa: E402
 
 try:
     from .gui.visualizer import get_visualizer
 
     _viz = get_visualizer()
-except Exception:  # keep cli importable without gui
+except Exception:  # keep the cli importable without the gui extras
     _viz = None
-from .config import PROVIDERS, ensure_config, load_config, run_wizard
-from .engines import ENGINES, fuzzy_match_engine
-from .prompts import live_system, plan_system, script_system, strip_fences
-from .redact import redact
+
+from .config import PROVIDERS, ensure_config, run_wizard  # noqa: E402
+from .engines import ENGINES, fuzzy_match_engine  # noqa: E402
+from .redact import redact  # noqa: E402
 
 try:
+    from pathlib import Path
+
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import FileHistory
-    from pathlib import Path
 
     _session: Any = PromptSession(history=FileHistory(str(Path.home() / ".unsql_history")))
 except Exception:  # pragma: no cover
@@ -43,31 +45,33 @@ except Exception:  # pragma: no cover
 
 BANNER = r"""
   _   _ _   _ ____   ___  _
- | | | | \ | / ___| / _ \| |     natural language -> SQL, on your database
- | | | |  \| \___ \| | | | |     type `help` for commands, `exit` to quit
+ | | | | \ | / ___| / _ \| |     a live natural-language layer over your database
+ | | | |  \| \___ \| | | | |     every input ends with ;   ·   help;   ·   exit;
  | |_| | |\  |___) | |_| | |___
   \___/|_| \_|____/ \__\_\_____|
 """
 
 HELP = """
-  connect <engine>        connect to a database (postgres, mysql, mariadb, mssql,
-                          oracle, sqlite, db2, snowflake, aurora, access)
-  disconnect              close the current connection
-  engines                 list available engines
-  tables                  list tables in the connected database
-  schema                  print the live schema UNSQL sends to the model
-  script <engine> <text>  offline mode: plan + full script for an engine, no DB needed
-  save <file>             write the last SQL (or last result) to a file
-  set                     re-run the AI provider / key / model wizard
-  set model <name>        switch model
-  auto on|off             run generated SQL without asking (default off)
-  gui [terminal]          open results dashboard (web by default, terminal for TUI)
-  export csv|json [path]  save last SELECT to CSV/JSON (sanitized, inject-safe)
-  help                    this text
-  exit                    quit
+  Every input — command or plain English — must end with ';'.
 
-  Anything else is treated as natural language (or raw SQL if it starts with a
-  SQL keyword) and executed against the connected database.
+  list;                     scan this machine for engines, drivers and instances
+  connect <engine>;         connect (postgres, mysql, mariadb, mssql, oracle,
+                            sqlite, db2, snowflake, aurora, access)
+  disconnect;               close the current connection
+  schema;  /  tables;       live structure of the connected database
+  verify;                   live row counts and what changed this session
+  changes;                  full session change log
+  set apikey;               AI provider / key / model wizard
+  set model <name>;         switch model
+  set readonly on|off;      block every write statement
+  set role viewer|analyst|admin;   viewer = SELECT only, analyst = no DDL
+  gui;  /  gui terminal;    results dashboard (web / TUI)
+  export csv|json|txt [path];      export the LAST SELECT result only
+  help;   exit;
+
+  Anything else is natural language, executed live against the connected
+  database. Confirmation prompts for DROP TABLE, DELETE without WHERE and
+  UPDATE without WHERE are always on.
 """
 
 _SQL_STARTERS = (
@@ -76,15 +80,26 @@ _SQL_STARTERS = (
     "rollback", "pragma", "show", "merge", "call", "use",
 )
 
+_WRITE_KINDS = {"insert", "update", "delete", "drop", "create", "alter", "truncate", "merge", "grant", "revoke"}
+_DDL_KINDS = {"drop", "create", "alter", "truncate", "grant", "revoke"}
+
+_PROBE_PORTS = {
+    "postgresql": 5432, "mysql": 3306, "mariadb": 3307, "mssql": 1433,
+    "oracle": 1521, "db2": 50000, "aurora": 3306,
+}
+
 
 class Repl:
     def __init__(self) -> None:
         self.cfg: dict = {}
         self.ai: AIClient | None = None
         self.engine: Any = None
-        self.auto = False
-        self.last_sql = ""
+        self.agent: Agent | None = None
+        self.readonly = False
+        self.role = "admin"
         self.last_result = None
+        self.last_sql = ""
+        self.changes: list[dict] = []
 
     # ── plumbing ─────────────────────────────────────────────────────────────
 
@@ -95,27 +110,52 @@ class Repl:
 
     def _prompt_label(self) -> str:
         if self.engine is not None:
-            return f"unsql[{self.engine.engine_type}]> "
-        return "unsql> "
+            return f"UNSQL[{self.engine.engine_type}]> "
+        return "CONNECT> "
 
     def _reload_ai(self) -> None:
         self.ai = AIClient(self.cfg)
+        if self.engine is not None:
+            self.agent = Agent(self.ai, self.engine, render.info)
 
-    # ── connection ───────────────────────────────────────────────────────────
+    def _confirm(self, question: str) -> bool:
+        try:
+            return input(f"  {question} [y/N] ").strip().lower() in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+
+    # ── discovery / connection ───────────────────────────────────────────────
+
+    def cmd_list(self) -> None:
+        rows = []
+        for name in sorted({"postgresql", "mysql", "mariadb", "mssql", "oracle", "sqlite",
+                            "db2", "snowflake", "aurora", "access"}):
+            driver = "installed" if name in ENGINES else "driver missing"
+            port = _PROBE_PORTS.get(name)
+            if name in ("sqlite", "access"):
+                local = "file-based"
+            elif port and _port_open("127.0.0.1", port):
+                local = f"instance on :{port}"
+            elif name == "snowflake":
+                local = "cloud"
+            else:
+                local = "-"
+            rows.append([name, driver, local])
+        render.table(["engine", "driver", "local scan"], rows)
 
     def cmd_connect(self, token: str) -> None:
         if not token:
-            render.warn("  usage: connect <engine>")
+            render.warn("  usage: connect <engine>;")
             return
         cls = fuzzy_match_engine(token)
         if cls is None:
             render.error(f"  No engine (or no installed driver) for '{token}'.")
-            render.info("  Available: " + ", ".join(sorted(ENGINES)))
+            render.info("  Run `list;` to see what is available.")
             return
         engine = cls()
         kwargs: dict[str, Any] = {}
         username = password = ""
-
         etype = engine.engine_type
         try:
             if etype in ("sqlite", "access"):
@@ -157,6 +197,7 @@ class Repl:
             return
 
         self.engine = engine
+        self.agent = Agent(self.ai, engine, render.info)
         render.info(f"  Connected to {engine.engine_name}.")
 
     def cmd_disconnect(self) -> None:
@@ -168,179 +209,237 @@ class Repl:
         except Exception:
             pass
         self.engine = None
+        self.agent = None
         render.info("  Disconnected.")
 
-    # ── introspection ────────────────────────────────────────────────────────
-
-    def _schema_text(self, nl: str = "") -> str:
-        if self.engine is None:
-            return ""
-        try:
-            return self.engine.schema_to_text(nl)
-        except Exception as exc:
-            render.warn(f"  Could not read schema: {redact(str(exc))}")
-            return ""
+    # ── live introspection ───────────────────────────────────────────────────
 
     def cmd_schema(self) -> None:
-        if self.engine is None:
-            render.warn("  Connect to a database first.")
-            return
-        text = self._schema_text()
-        render.plain(text or "  (no tables yet)")
-
-    def cmd_tables(self) -> None:
-        if self.engine is None:
-            render.warn("  Connect to a database first.")
+        if not self._need_connection():
             return
         try:
-            names = [t.name for t in (self.engine.get_schema() or [])]
+            text = self.engine.schema_to_text("")
         except Exception as exc:
             render.error(f"  {redact(str(exc))}")
             return
-        if not names:
-            render.info("  No tables.")
+        render.plain(text or "  (no tables yet)")
+
+    def cmd_verify(self) -> None:
+        if not self._need_connection():
             return
-        render.table(["table"], [[n] for n in names])
+        try:
+            tables = [t.name for t in (self.engine.get_schema() or [])]
+        except Exception as exc:
+            render.error(f"  {redact(str(exc))}")
+            return
+        if not tables:
+            render.info("  No tables in the live database.")
+            return
+        rows = []
+        touched = {c["table"] for c in self.changes if c.get("table")}
+        for name in tables:
+            try:
+                res = self.engine.execute(f"SELECT COUNT(*) FROM {name}")
+                count = res.rows[0][0] if res and res.rows else 0
+            except Exception as exc:
+                count = f"error: {redact(str(exc))[:40]}"
+            rows.append([name, count, "changed" if name.lower() in touched else ""])
+        render.table(["table", "live rows", "this session"], rows)
+
+    def cmd_changes(self) -> None:
+        if not self.changes:
+            render.info("  No changes recorded this session.")
+            return
+        rows = [[str(i + 1), c["kind"].upper(), c.get("table") or "-", str(c["rowcount"]),
+                 c["sql"].splitlines()[0][:70]] for i, c in enumerate(self.changes)]
+        render.table(["#", "op", "table", "rows", "statement"], rows)
+
+    def _need_connection(self) -> bool:
+        if self.engine is None:
+            render.warn("  Not connected. Use `connect <engine>;` first.")
+            return False
+        return True
+
+    # ── safety guards ────────────────────────────────────────────────────────
+
+    def _guard(self, stmt: str) -> bool:
+        """Role / readonly checks + always-on confirmations. False = don't run."""
+        kind = statement_kind(stmt)
+        body = " ".join(
+            l for l in stmt.splitlines() if not l.strip().startswith("--")
+        ).lower()
+        if kind in _WRITE_KINDS:
+            if self.readonly:
+                render.error("  readonly is on — write blocked.")
+                return False
+            if self.role == "viewer":
+                render.error("  role viewer — only SELECT is allowed.")
+                return False
+            if self.role == "analyst" and kind in _DDL_KINDS:
+                render.error("  role analyst — DDL is not allowed.")
+                return False
+        if kind == "drop" and " table " in f" {body} ":
+            render.sql(stmt)
+            return self._confirm("DROP TABLE — confirm?")
+        if kind == "delete" and " where " not in body:
+            render.sql(stmt)
+            return self._confirm("DELETE without WHERE — confirm?")
+        if kind == "update" and " where " not in body:
+            render.sql(stmt)
+            return self._confirm("UPDATE without WHERE — confirm?")
+        return True
 
     # ── execution ────────────────────────────────────────────────────────────
 
-    def _run_sql(self, script: str) -> None:
-        statements = _split_statements(script)
-        for stmt in statements:
+    def _savepoint(self, name: str) -> bool:
+        try:
+            self.engine.execute(f"SAVEPOINT {name}")
+            return True
+        except Exception:
+            return False
+
+    def _rollback_to(self, name: str) -> None:
+        try:
+            self.engine.execute(f"ROLLBACK TO SAVEPOINT {name}")
+        except Exception:
             try:
-                result = self.engine.execute(stmt)
-            except Exception as exc:
-                render.error(f"  {redact(str(exc))}")
+                self.engine.execute(f"ROLLBACK TO {name}")
+            except Exception:
+                pass
+
+    def _record(self, stmt: str, result: Any) -> None:
+        kind = statement_kind(stmt)
+        if kind in _WRITE_KINDS:
+            self.changes.append({
+                "kind": kind,
+                "table": _table_of(stmt),
+                "rowcount": getattr(result, "rowcount", 0) or 0,
+                "sql": stmt,
+            })
+
+    def _execute_one(self, stmt: str) -> bool:
+        """Run one statement. Self-corrects once via the agent, rolls back that step only."""
+        if not self._guard(stmt):
+            render.info("  Step skipped.")
+            return True
+        sp = f"unsql_sp_{len(self.changes)}"
+        has_sp = self._savepoint(sp)
+        try:
+            result = self.engine.execute(stmt)
+        except Exception as exc:
+            if has_sp:
+                self._rollback_to(sp)
+            error = redact(str(exc))
+            if self.agent is None:
+                render.error(f"  {error}")
+                return False
+            render.info("  agent · self-correcting this step")
+            try:
+                fixes = self.agent.repair(stmt, error)
+            except AIError as ai_exc:
+                render.error(f"  {redact(str(ai_exc))}")
+                return False
+            if not fixes:
+                render.warn(f"  Step skipped after error: {error}")
+                return True
+            for fixed in fixes:
+                if not self._guard(fixed):
+                    continue
                 try:
-                    self.engine.rollback()
+                    result = self.engine.execute(fixed)
+                except Exception as exc2:
+                    if has_sp:
+                        self._rollback_to(sp)
+                    render.error(f"  {redact(str(exc2))}")
+                    return False
+                self._show(result, fixed)
+                self._record(fixed, result)
+            return True
+        self._show(result, stmt)
+        self._record(stmt, result)
+        return True
+
+    def _show(self, result: Any, stmt: str) -> None:
+        if result is None:
+            return
+        if result.is_select:
+            header = _label(stmt)
+            if header:
+                render.info(f"  {header}")
+            render.table(result.columns, result.rows)
+            self.last_result = result
+            if _viz is not None and result.rows is not None:
+                try:
+                    _viz.push_result(columns=list(result.columns), rows=list(result.rows),
+                                     sql=stmt, title=f"{self.engine.engine_type} result")
                 except Exception:
                     pass
-                return
-            if result is None:
-                continue
-            if result.is_select:
-                render.table(result.columns, result.rows)
-                self.last_result = result
-                if _viz is not None and result.rows is not None:
-                    try:
-                        _viz.push_result(
-                            columns=list(result.columns),
-                            rows=list(result.rows),
-                            sql=stmt,
-                            title=f"{self.engine.engine_type} result",
-                        )
-                    except Exception:
-                        pass
-            else:
-                render.info(f"  OK ({result.rowcount} row(s) affected)")
+        else:
+            render.info(f"  OK ({result.rowcount} row(s) affected)")
+
+    def _run_script(self, statements: list[str]) -> None:
+        total = len(statements)
+        for i, stmt in enumerate(statements, 1):
+            if total > 1:
+                render.plain(f"\n  [{i}/{total}]")
+            render.sql(stmt)
+            self.last_sql = stmt
+            if not self._execute_one(stmt):
+                render.error("  Run halted at this step; earlier steps are committed.")
+                break
         try:
             self.engine.commit()
         except Exception:
             pass
 
     def cmd_sql(self, sql: str) -> None:
-        if self.engine is None:
-            render.warn("  Connect to a database first.")
+        if not self._need_connection():
             return
-        self.last_sql = sql
-        self._run_sql(sql)
+        self._run_script(split_statements(sql))
 
     def cmd_nl(self, text: str) -> None:
-        if self.engine is None:
-            render.warn("  Connect to a database first, or use `script <engine> <request>`.")
+        if not self._need_connection():
             return
-        assert self.ai is not None
-        schema = self._schema_text(text)
-        render.info("  thinking...")
+        assert self.agent is not None
         try:
-            raw = self.ai.complete(live_system(self.engine.engine_type, schema), text)
+            statements = self.agent.plan_and_write(text)
         except AIError as exc:
             render.error(f"  {redact(str(exc))}")
             return
-        sql = strip_fences(raw)
-        if not sql:
+        if not statements:
             render.warn("  The model produced no SQL.")
             return
-        self.last_sql = sql
-        render.plain()
-        render.sql(sql)
-        if not self.auto:
-            try:
-                answer = input("  Run this? [Y/n] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return
-            if answer not in ("", "y", "yes"):
-                render.info("  Skipped. `save <file>` still works.")
-                return
-        self._run_sql(sql)
+        render.info(f"  agent · executing {len(statements)} statement(s) live")
+        self._run_script(statements)
 
-    def cmd_script(self, rest: str) -> None:
-        """Offline: plan pass + full script pass for any engine, no DB needed."""
-        parts = rest.split(None, 1)
-        if len(parts) < 2:
-            render.warn("  usage: script <engine> <request>")
-            return
-        token, request = parts[0], parts[1]
-        cls = fuzzy_match_engine(token)
-        engine_type = cls().engine_type if cls else token.lower()
-        assert self.ai is not None
-        schema = self._schema_text(request) if self.engine is not None else ""
-
-        render.info("  pass 1/2 — planning")
-        try:
-            plan = self.ai.complete(plan_system(engine_type), request, on_delta=_echo)
-            render.plain("\n")
-            render.info("  pass 2/2 — writing SQL")
-            script = self.ai.complete(
-                script_system(engine_type, schema=schema),
-                f"PLAN:\n{plan}\n\nORIGINAL REQUEST:\n{request}",
-                on_delta=_echo,
-            )
-        except AIError as exc:
-            render.error(f"\n  {redact(str(exc))}")
-            return
-        render.plain("\n")
-        self.last_sql = strip_fences(script)
-        render.info("  Done. `save <file>` writes the script; paste it or run it yourself.")
-
-    # ── misc commands ────────────────────────────────────────────────────────
-
-    def cmd_save(self, path: str) -> None:
-        if not path:
-            render.warn("  usage: save <file>")
-            return
-        if not self.last_sql:
-            render.warn("  Nothing to save yet.")
-            return
-        try:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(self.last_sql.rstrip() + "\n")
-        except OSError as exc:
-            render.error(f"  {exc}")
-            return
-        render.info(f"  Wrote {path}")
+    # ── settings ─────────────────────────────────────────────────────────────
 
     def cmd_set(self, rest: str) -> None:
-        if rest.startswith("model"):
-            model = rest[5:].strip()
-            if not model:
-                render.warn("  usage: set model <name>")
+        head, _, val = rest.partition(" ")
+        head, val = head.lower(), val.strip().lower()
+        if head == "model":
+            if not val:
+                render.warn("  usage: set model <name>;")
                 return
             from .config import set_model
 
-            self.cfg = set_model(model)
+            self.cfg = set_model(val)
             self._reload_ai()
-            render.info(f"  Model set to {model}")
-            return
-        self.cfg = run_wizard(self.cfg)
-        self._reload_ai()
-
-    def cmd_engines(self) -> None:
-        rows = [[name, "ready" if name in ENGINES else "driver missing"] for name in sorted(
-            {"postgresql", "mysql", "mariadb", "mssql", "oracle", "sqlite", "db2",
-             "snowflake", "aurora", "access"})]
-        render.table(["engine", "status"], rows)
+            render.info(f"  Model set to {val}")
+        elif head in ("apikey", "api_key", "provider", ""):
+            self.cfg = run_wizard(self.cfg)
+            self._reload_ai()
+        elif head == "readonly":
+            self.readonly = val in ("on", "true", "yes", "1")
+            render.info(f"  readonly {'on' if self.readonly else 'off'}")
+        elif head == "role":
+            if val not in ("viewer", "analyst", "admin"):
+                render.warn("  usage: set role viewer|analyst|admin;")
+                return
+            self.role = val
+            render.info(f"  role {val}")
+        else:
+            render.warn("  usage: set apikey; | set model <name>; | set readonly on|off; | set role <r>;")
 
     # ── gui / export ─────────────────────────────────────────────────────────
 
@@ -348,78 +447,83 @@ class Repl:
         if _viz is None:
             render.error("  GUI not available (install rich).")
             return
-        mode = rest.strip().lower()
-        if mode in ("terminal", "tui"):
+        if rest.strip().lower() in ("terminal", "tui"):
             _viz.launch_terminal()
             return
         has = self.last_result is not None and self.last_result.is_select
-        cols = list(self.last_result.columns) if has else None
-        rows = list(self.last_result.rows or []) if has else None
-        sql = self.last_sql if isinstance(self.last_sql, str) else ""
         try:
-            url = _viz.launch_web(columns=cols, rows=rows, sql=sql)
-            render.info(f"  GUI dashboard at {url} — use `gui terminal` for TUI or `export csv|json`")
+            url = _viz.launch_web(
+                columns=list(self.last_result.columns) if has else None,
+                rows=list(self.last_result.rows or []) if has else None,
+                sql=self.last_sql,
+            )
+            render.info(f"  GUI dashboard at {url}")
         except Exception as exc:
             render.error(f"  Failed to launch GUI: {exc}")
 
     def cmd_export(self, rest: str) -> None:
         parts = rest.split(None, 1)
         fmt = parts[0].lower() if parts else ""
-        path = parts[1].strip().rstrip(";") if len(parts) > 1 else None
-        if fmt not in ("csv", "json"):
-            render.warn("  usage: export csv [path]  |  export json [path]")
+        path = parts[1].strip() if len(parts) > 1 else None
+        if fmt not in ("csv", "json", "txt"):
+            render.warn("  usage: export csv|json|txt [path];  (exports the last SELECT only)")
             return
         res = self.last_result
-        if _viz is None:
-            render.error("  GUI not available.")
-            return
         if not res or not res.is_select or not res.rows:
-            render.warn("  Nothing to export — run a SELECT first.")
+            render.warn("  Nothing to export — run a query that returns rows first.")
             return
-        out = path or ("unsql_export.csv" if fmt == "csv" else "unsql_export.json")
+        out = path or f"unsql_export.{fmt}"
         try:
-            if fmt == "csv":
-                p = _viz.export_csv(out, columns=list(res.columns), rows=list(res.rows))
+            if fmt == "txt":
+                with open(out, "w", encoding="utf-8") as fh:
+                    fh.write(" | ".join(str(c) for c in res.columns) + "\n")
+                    for row in res.rows:
+                        fh.write(" | ".join("NULL" if v is None else str(v) for v in row) + "\n")
+                target: Any = out
+            elif _viz is None:
+                render.error("  CSV/JSON export needs the gui extras.")
+                return
+            elif fmt == "csv":
+                target = _viz.export_csv(out, columns=list(res.columns), rows=list(res.rows))
             else:
-                p = _viz.export_json(out, columns=list(res.columns), rows=list(res.rows))
-            render.info(f"  Exported {len(res.rows)} rows to {p.resolve()}")
+                target = _viz.export_json(out, columns=list(res.columns), rows=list(res.rows))
+            render.info(f"  Exported {len(res.rows)} rows of the last result to {target}")
         except Exception as exc:
             render.error(f"  Export failed: {exc}")
 
     # ── loop ─────────────────────────────────────────────────────────────────
 
-    def dispatch(self, line: str) -> bool:
-        """Returns False when the REPL should exit."""
-        text = line.strip().rstrip(";").strip() if line.strip().endswith(";") else line.strip()
+    def dispatch(self, raw: str) -> bool:
+        line = raw.strip()
+        if not line:
+            return True
+        if not line.endswith(";"):
+            render.warn("  Every input must end with ';' — commands and plain English alike.")
+            return True
+        text = line[:-1].strip()
         if not text:
             return True
         head, _, rest = text.partition(" ")
-        head_l = head.lower()
-        rest = rest.strip()
+        head_l, rest = head.lower(), rest.strip()
 
-        if head_l in ("exit", "quit", "\\q"):
+        if head_l in ("exit", "quit"):
             return False
         if head_l == "help":
             render.plain(HELP)
+        elif head_l == "list":
+            self.cmd_list()
         elif head_l == "connect":
             self.cmd_connect(rest)
         elif head_l == "disconnect":
             self.cmd_disconnect()
-        elif head_l == "engines":
-            self.cmd_engines()
-        elif head_l == "tables":
-            self.cmd_tables()
-        elif head_l == "schema":
+        elif head_l in ("schema", "tables"):
             self.cmd_schema()
-        elif head_l == "script":
-            self.cmd_script(rest)
-        elif head_l == "save":
-            self.cmd_save(rest)
+        elif head_l == "verify":
+            self.cmd_verify()
+        elif head_l == "changes":
+            self.cmd_changes()
         elif head_l == "set":
             self.cmd_set(rest)
-        elif head_l == "auto":
-            self.auto = rest.lower() in ("on", "true", "yes", "1")
-            render.info(f"  auto-run {'on' if self.auto else 'off'}")
         elif head_l == "gui":
             self.cmd_gui(rest)
         elif head_l == "export":
@@ -446,7 +550,7 @@ class Repl:
             try:
                 if not self.dispatch(line):
                     break
-            except Exception as exc:  # never die on a single bad command
+            except Exception as exc:  # never die on a single bad input
                 render.error(f"  {redact(str(exc))}")
         if self.engine is not None:
             try:
@@ -457,77 +561,39 @@ class Repl:
         return 0
 
 
-def _echo(delta: str) -> None:
-    sys.stdout.write(delta)
-    sys.stdout.flush()
+def _port_open(host: str, port: int, timeout: float = 0.15) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
 
 
-def _split_statements(script: str) -> list[str]:
-    """Split on ';' outside quotes; keeps PL/SQL-ish blocks intact via '/' lines."""
-    out: list[str] = []
-    buf: list[str] = []
-    quote: str | None = None
-    i = 0
-    while i < len(script):
-        ch = script[i]
-        if quote:
-            buf.append(ch)
-            if ch == quote:
-                quote = None
-        elif ch in ("'", '"'):
-            quote = ch
-            buf.append(ch)
-        elif ch == "-" and script[i : i + 2] == "--":
-            while i < len(script) and script[i] != "\n":
-                i += 1
-            buf.append("\n")
-            continue
-        elif ch == ";":
-            stmt = "".join(buf).strip()
-            if stmt:
-                out.append(stmt)
-            buf = []
-        else:
-            buf.append(ch)
-        i += 1
-    tail = "".join(buf).strip()
-    if tail and tail != "/":
-        out.append(tail)
-    return out
+def _label(stmt: str) -> str:
+    for line in stmt.splitlines():
+        s = line.strip()
+        if s.startswith("--"):
+            return s.lstrip("-").strip()
+        if s:
+            break
+    return ""
+
+
+_TABLE_WORDS = ("into", "from", "update", "table")
+
+
+def _table_of(stmt: str) -> str | None:
+    words = [w.strip("`\"[];,()") for w in stmt.replace("\n", " ").split()]
+    for i, w in enumerate(words[:-1]):
+        if w.lower() in _TABLE_WORDS:
+            cand = words[i + 1]
+            if cand.lower() in ("if", "exists"):
+                continue
+            return cand.split(".")[-1].lower()
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
-    import os
+    from .unsql import main as launcher_main
 
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in ("-h", "--help"):
-        render.plain(HELP)
-        render.plain("  launcher flags: --gui  --gui-port PORT  --gui-no-browser  --setup\n")
-        return 0
-    if argv and argv[0] == "--setup":
-        run_wizard(load_config())
-        return 0
-
-    if "--gui" in argv:
-        os.environ["UNSQL_GUI"] = "1"
-    for i, a in enumerate(argv):
-        if a == "--gui-port" and i + 1 < len(argv):
-            os.environ["UNSQL_GUI_PORT"] = argv[i + 1]
-        elif a.startswith("--gui-port="):
-            os.environ["UNSQL_GUI_PORT"] = a.split("=", 1)[1]
-        elif a == "--gui-no-browser":
-            os.environ["UNSQL_GUI_NO_BROWSER"] = "1"
-
-    repl = Repl()
-    if os.getenv("UNSQL_GUI"):
-        try:
-            from .gui.visualizer import get_visualizer
-
-            viz = get_visualizer()
-            viz.config.web_port = int(os.getenv("UNSQL_GUI_PORT", "8765"))
-            no_browser = os.getenv("UNSQL_GUI_NO_BROWSER")
-            url = viz.launch_web(open_browser=not bool(no_browser))
-            print(f"[GUI] Dashboard at {url}  — inside REPL type gui or export csv|json")
-        except Exception as exc:
-            print(f"[GUI] Failed to start dashboard: {exc}")
-    return repl.run()
+    return launcher_main(argv if argv is not None else sys.argv[1:])
